@@ -1,0 +1,6 @@
+[submodule "submodules/RAFT"]
+	path = submodules/RAFT
+	url = https://github.com/princeton-vl/RAFT.git
+[submodule "submodules/pytorch-CycleGAN-and-pix2pix"]
+	path = submodules/pytorch-CycleGAN-and-pix2pix
+	url = https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix.git
