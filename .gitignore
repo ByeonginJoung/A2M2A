@@ -2,3 +2,5 @@ data_sample/
 dataset/*
 demo_items/
 logs/
+.gitignore
+.gitmodules
