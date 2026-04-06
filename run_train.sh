@@ -9,7 +9,7 @@ cd "$SCRIPT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # Where to discover subject folders (used when SUB_NAMES is not provided).
-DATASET_ROOT="${DATASET_ROOT:-/hdd4tb_00/dataset/mri_data}"
+DATASET_ROOT="${DATASET_ROOT:-/ssd1tb_00/dataset/mri_data}"
 
 # Allow manual control over the subject ids (space-separated list). When empty we discover
 # them automatically from DATASET_ROOT (looking for directories named 'subXXX').
@@ -19,7 +19,7 @@ else
     mapfile -t SUB_NAME_ARRAY < <(
         python - <<'PY'
 import os
-root = os.environ.get('DATASET_ROOT', '/hdd4tb_00/dataset/mri_data')
+root = os.environ.get('DATASET_ROOT', '/ssd1tb_00/dataset/mri_data')
 subs = []
 for name in os.listdir(root):
     if name.startswith('sub') and len(name) >= 4:

@@ -16,7 +16,7 @@ def run_speech_to_mri(audio_file, output_dir, log_dir, use_prev_frame):
         cmd.append("--use_prev_frame")
     subprocess.run(cmd, check=True)
 
-def run_mri_to_anime(input_dir, output_dir, single_image, debug_anime, pre_scale_target=True):
+def run_mri_to_anime(input_dir, output_dir, single_image, debug_anime, pre_scale_target=True, metrics_save_path=None):
     from main import process_single_image, process_video
     if single_image:
         process_single_image(input_dir, output_dir, "data_sample/ref_mri.png", "data_sample/ref_anime.png")
@@ -24,10 +24,11 @@ def run_mri_to_anime(input_dir, output_dir, single_image, debug_anime, pre_scale
         process_video(
             input_dir,
             output_dir,
-            "data_sample/ref_mri.png",
-            "data_sample/ref_anime.png",
+            "data_sample/ref_mri_0.png",
+            "data_sample/ref_anime_0.png",
             debug=debug_anime,
             pre_scale_target=pre_scale_target,
+            metrics_save_path=metrics_save_path,
         )
 
 if __name__ == "__main__":

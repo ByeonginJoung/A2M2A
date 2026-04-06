@@ -2,7 +2,7 @@ from easydict import EasyDict as edict
 
 def get_args():
     args_edict = edict()
-    args_edict.dataset_dir = '/hdd4tb_00/dataset/mri_data'
+    args_edict.dataset_dir = '/ssd1tb_00/dataset/mri_data'
     
     args_edict.seed = 1234
 

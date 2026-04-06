@@ -12,12 +12,14 @@ except ImportError:
     SITK_AVAILABLE = False
 
 # Add RAFT submodule to Python path
-sys.path.append('submodules/RAFT')
-sys.path.append('submodules/RAFT/core')
+# Must add RAFT/core to sys.path and import without submodules prefix (mimics RAFT's demo.py)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_raft_core = os.path.join(_script_dir, 'submodules', 'RAFT', 'core')
+sys.path.insert(0, _raft_core)  # Insert at beginning so RAFT's utils takes priority
 
-from submodules.RAFT.core.raft import RAFT
-from submodules.RAFT.core.utils.flow_viz import flow_to_image
-from submodules.RAFT.core.utils import flow_viz
+from raft import RAFT
+from utils import flow_viz
+from utils.flow_viz import flow_to_image
 
 def read_video_frames(video_path):
     """Reads all frames from a video file."""
@@ -63,7 +65,19 @@ def register_ecc(ref_img, target_img):
         target_warped = cv2.warpAffine(target_img, warp_matrix, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
         mse = np.mean((ref_img.astype("float") - target_warped.astype("float")) ** 2)
         return warp_matrix, mse
-    except cv2.error:
+    except cv2.error as exc:
+        try:
+            print("ECC failed:", exc)
+            print("  ref_img: shape={}, dtype={}, min={}, max={}, mean={}, std={}".format(
+                ref_img.shape, ref_img.dtype, float(np.min(ref_img)), float(np.max(ref_img)),
+                float(np.mean(ref_img)), float(np.std(ref_img))
+            ))
+            print("  target_img: shape={}, dtype={}, min={}, max={}, mean={}, std={}".format(
+                target_img.shape, target_img.dtype, float(np.min(target_img)), float(np.max(target_img)),
+                float(np.mean(target_img)), float(np.std(target_img))
+            ))
+        except Exception:
+            print("ECC failed and debug stats could not be computed.")
         return np.eye(2, 3, dtype=np.float32), float('inf')
 
 def register_orb(ref_img, target_img):
@@ -241,7 +255,7 @@ def visualize_flow_arrows(frame, flow, step=16):
             
     return vis_frame
 
-def main(ref_mri_path, ref_anime_path, target_video_path, output_video_path, registration_mode='ecc', debug=False, debug_flow_mode='color', pre_scale_target=True):
+def main(ref_mri_path, ref_anime_path, target_video_path, output_video_path, registration_mode='ecc', debug=False, debug_flow_mode='color', pre_scale_target=True, metrics_save_path=None):
     """
     Main processing pipeline.
     """
@@ -283,13 +297,25 @@ def main(ref_mri_path, ref_anime_path, target_video_path, output_video_path, reg
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         transform, mse = get_registration_for_frame(ref_mri, gray_frame, mode=registration_mode)
         if (i + 1) % 10 == 0:
-            print("  - Scanned frame {}".format(i + 1))
+            print("  - Scanned frame {} | mse {}".format(i + 1, mse))
         if mse < lowest_mse:
             lowest_mse = mse
             best_transform = transform
             best_frame_index = i
     
     print("\nFound best match at frame {} with MSE {:.4f}\n".format(best_frame_index, lowest_mse))
+
+    if metrics_save_path:
+        import json as _json
+        os.makedirs(os.path.dirname(os.path.abspath(metrics_save_path)), exist_ok=True)
+        with open(metrics_save_path, "w") as _f:
+            _json.dump(
+                {"registration_error": float(lowest_mse), "anchor_index": int(best_frame_index)},
+                _f,
+                indent=2,
+            )
+        print("Registration metrics saved to {}".format(metrics_save_path))
+
     rigid_transform = best_transform
     
     h_orig, w_orig = target_dims
@@ -363,7 +389,7 @@ def main(ref_mri_path, ref_anime_path, target_video_path, output_video_path, reg
     out.release()
     print("Processed video saved to {}".format(output_video_path))
 
-def process_video(target_video_path, output_dir, ref_mri_path, ref_anime_path, registration_mode='ecc', debug=False, debug_flow_mode='color', pre_scale_target=True):
+def process_video(target_video_path, output_dir, ref_mri_path, ref_anime_path, registration_mode='ecc', debug=False, debug_flow_mode='color', pre_scale_target=True, metrics_save_path=None):
     output_video_path = os.path.join(output_dir, os.path.basename(target_video_path))
     main(
         ref_mri_path,
@@ -374,6 +400,7 @@ def process_video(target_video_path, output_dir, ref_mri_path, ref_anime_path, r
         debug,
         debug_flow_mode,
         pre_scale_target,
+        metrics_save_path=metrics_save_path,
     )
 
 def process_single_image(target_image_path, output_dir, ref_mri_path, ref_anime_path):

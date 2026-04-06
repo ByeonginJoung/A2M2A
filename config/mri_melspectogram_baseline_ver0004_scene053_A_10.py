@@ -1,17 +1,16 @@
 from easydict import EasyDict as edict
 
-
-def get_scene_args():
+def get_args():
     args_edict = edict()
     args_edict.dataset_dir = '/ssd1tb_00/dataset/mri_data'
     
     args_edict.seed = 1234
 
-    args_edict.train_epoch = 900
+    args_edict.train_epoch = 1000
     args_edict.epoch_print = 20
-    args_edict.epoch_viz = 300
-    args_edict.epoch_save = 300
-    args_edict.epoch_eval = 300
+    args_edict.epoch_viz = 200
+    args_edict.epoch_save = 200
+    args_edict.epoch_eval = 200
     
     args_edict.batch_size = 1
     args_edict.num_workers = 1
@@ -27,12 +26,12 @@ def get_scene_args():
     args_edict.model.use_dropout = True
     args_edict.model.residual = True
     args_edict.model.use_deform = False
-    args_edict.model.use_prev_frame = True
-    args_edict.model.use_feature_fusion = True  # set False to ablate audio-visual feature-level fusion
+    args_edict.model.use_prev_frame = False
+    args_edict.model.use_feature_fusion = False
 
-    args_edict.model.in_feat = 128
+    args_edict.model.in_feat = 128 # for mgclsp, generally 25, for raw, 534, for melspectogram, 80
     
-    args_edict.mseloss_weight = 1.0
+    args_edict.mseloss_weight = 1.
     
     args_edict.use_ssimloss = True
     args_edict.ssimloss_window = 9
@@ -50,7 +49,7 @@ def get_scene_args():
     args_edict.data.samplingFrequency = 44100
     args_edict.data.frameLength = 2048
     args_edict.data.frameShift = 533
-    args_edict.data.fps_control_ratio = 6.0
+    args_edict.data.fps_control_ratio = 6. # strongly recommended usage for this value as int type
     args_edict.data.cut_rand_initial = True
 
     args_edict.data.augmentation = edict()
@@ -58,13 +57,13 @@ def get_scene_args():
     args_edict.data.augmentation.add_gaussian = True
     args_edict.data.augmentation.add_gaussian_mean = 0.0
     args_edict.data.augmentation.add_gaussian_std = 1
-    args_edict.data.augmentation.add_spectral_scaling = False
+    args_edict.data.augmentation.add_spectral_scaling = False   # this is for mgclsp
     args_edict.data.augmentation.spectral_scaling_factor = 0.1
-    args_edict.data.augmentation.add_time_stretch_mgc = False
+    args_edict.data.augmentation.add_time_stretch_mgc = False   # this is for mgclsp
     args_edict.data.augmentation.add_time_stretch = False
-    args_edict.data.augmentation.time_stretch_factor = 1.1
+    args_edict.data.augmentation.time_stretch_factor=1.1
     args_edict.data.augmentation.add_random_erasing = False
-    args_edict.data.augmentation.random_erasing_prob = 0.5
-    args_edict.data.augmentation.random_erasing_size = 0.1
-
+    args_edict.data.augmentation.random_erasing_prob=0.5
+    args_edict.data.augmentation.random_erasing_size=0.1
+        
     return args_edict

@@ -35,12 +35,55 @@ def load_video(video_path):
     cap.release()
     return buf
 
+def _auto_detect_config_name(log_dir, default_config_name):
+    """
+    Try to find the right config name from the model's saved config directory.
+    The saved config dir contains a .py file whose name matches the experiment
+    config (e.g. mri_melspectogram_baseline_ver0004_scene053_2.py).
+    We pick the file that shares the most name overlap with the log_dir basename.
+    Falls back to default_config_name if nothing suitable is found.
+    """
+    config_dir = os.path.join(log_dir, 'config')
+    if not os.path.isdir(config_dir):
+        return default_config_name
+
+    exp_base = os.path.basename(log_dir)
+    candidates = [
+        f[:-3] for f in os.listdir(config_dir)
+        if f.endswith('.py') and not f.startswith('__')
+    ]
+    if not candidates:
+        return default_config_name
+
+    # Prefer an exact suffix match: exp name ends with the config name
+    for c in sorted(candidates, key=len, reverse=True):
+        if exp_base.endswith(c):
+            return c
+
+    # Fallback: longest common suffix
+    def common_suffix_len(a, b):
+        length = 0
+        for x, y in zip(reversed(a), reversed(b)):
+            if x == y:
+                length += 1
+            else:
+                break
+        return length
+
+    best = max(candidates, key=lambda c: common_suffix_len(exp_base, c))
+    if common_suffix_len(exp_base, best) > 5:
+        return best
+
+    return default_config_name
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--audio_file', type=str, required=True)
     parser.add_argument('--log_dir', type=str, required=True)
     parser.add_argument('--output_dir', type=str, required=True)
-    parser.add_argument('--config_name', type=str, default='mri_melspectogram_baseline_ver0004_multi')
+    parser.add_argument('--config_name', type=str, default=None,
+                        help="Config name to load. If omitted, auto-detected from log_dir/config/.")
     parser.add_argument('--dataset_type', type=str, default='75-speaker-multi')
     parser.add_argument('--exp_name', type=str, default='exp0000')
     parser.add_argument('--seed', type=int, default=1234)
@@ -48,6 +91,12 @@ def main():
     parser.add_argument('--use_prev_frame', action='store_true', help="Enable autoregressive generation using a reference frame.")
     
     args = parser.parse_args()
+
+    # Auto-detect config from the model's saved config directory
+    default_config = 'mri_melspectogram_baseline_ver0004_multi'
+    if args.config_name is None:
+        args.config_name = _auto_detect_config_name(args.log_dir, default_config)
+        print(f"[inference] Auto-detected config: {args.config_name}")
     
     new_args = load_config(args)
 

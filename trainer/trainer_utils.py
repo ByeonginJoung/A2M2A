@@ -9,13 +9,13 @@ from tqdm import tqdm
 from models.speech_to_2d_mri import Speech2MRI2D
 
 def build_optimizer_model(args, logger, dataset, device):
-    
+
     return load_model(args,
                       args.model.in_feat,
                       dataset.frameHeight,
                       dataset.frameWidth,
                       device)
-    
+
 def load_model(args, n_input_feats, H, W, device):
 
     model = Speech2MRI2D(args,
@@ -26,11 +26,11 @@ def load_model(args, n_input_feats, H, W, device):
     optimizer = torch.optim.Adam([{"params": model.parameters(), "lr": args.lr}])
     #scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9999)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=200, gamma=0.8)
-    
+
     log_file_list = os.listdir(args.log_dir)
 
     ckpt_list = list()
-    
+
     for fname in log_file_list:
         if 'ckpt' in fname:
             ckpt_list.append(fname)
@@ -40,7 +40,7 @@ def load_model(args, n_input_feats, H, W, device):
             last_ckpt_fname = sorted(ckpt_list)[-1]
         else:
             last_ckpt_fname = sorted(ckpt_list)[args.select_ckpt_idx]
-            
+
         ckpt_path = os.path.join(
             args.log_dir,
             last_ckpt_fname
@@ -53,7 +53,7 @@ def load_model(args, n_input_feats, H, W, device):
         optimizer.load_state_dict(state_dict['optimizer'])
 
         print(f'load: {last_ckpt_fname} of {args.log_dir}')
-        
+
         # Move optimizer state to the GPU
         for state in optimizer.state.values():
             if isinstance(state, torch.Tensor):
@@ -71,12 +71,12 @@ def load_model(args, n_input_feats, H, W, device):
         print(f'loaded model for epoch: {start_iter}')
         print(f'=======================================')
         print(f'=======================================')
-        
+
     else:
         start_iter = 1
         mgc_mean = 0
         mgc_std = 0
-        
+
     return optimizer, scheduler, model, start_iter, (mgc_mean, mgc_std)
 
 def data_batchify(voice, video=None, lookback=10, fps_control_ratio=1):
@@ -97,7 +97,7 @@ def data_batchify(voice, video=None, lookback=10, fps_control_ratio=1):
         new_video = video[lookback-1:]
     else:
         new_video = None
-        
+
     _, L, C = voice.shape
     voice = voice.permute(1,0,2)
 

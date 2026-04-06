@@ -23,14 +23,14 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
 
     #mgc_mean = torch.from_numpy(data_stats[0]).to(device)
     #mgc_std = torch.from_numpy(data_stats[1]).to(device)
-    
+
     with torch.no_grad():
-        for _, items in enumerate(tqdm(val_loader)):
+        for _, items in enumerate(tqdm(val_loader, ncols=150)):
             video = items[0].to(device)
             audio = items[1].to(device)
 
             H, W = video.shape[-2], video.shape[-1]
-            
+
             new_video, new_audio = data_batchify(audio, video, args.data.lookback, args.data.fps_control_ratio)
 
             if args.model.use_deform:
@@ -41,7 +41,7 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
 
                 temp_vid_list = list()
 
-                for proc_idx, temp_audio in enumerate(tqdm(new_audio)):
+                for proc_idx, temp_audio in enumerate(tqdm(new_audio, ncols=150)):
                     with torch.no_grad():
                         if proc_idx == 0:
                             in_aud = temp_audio.unsqueeze(0)
@@ -51,7 +51,7 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
                         else:
                             in_aud = temp_audio.unsqueeze(0)
                             prev_vid = temp_vid_list[-1].unsqueeze(0).cuda()
-                            
+
                             temp_pred = model(in_aud, prev_vid).view(H, W).cpu().detach().squeeze()
                         temp_vid_list.append(temp_pred)
 
@@ -68,12 +68,17 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
     # save file here
     if True:
         video_fname = items[-1][0]
-        prediction = (pred.numpy() * 255).astype(np.uint8)
+
+        if pred.get_device() > -1:
+            pred = pred.detach().cpu().numpy()
+        else:
+            pred = pred.numpy()
+        prediction = (pred * 255).astype(np.uint8)
         process_list = ['cp', '-r', video_fname, 'demo_items/debug_eval_origin.avi']
         subprocess.run(process_list)
 
         output_file = f'demo_items/debug_eval_pred_{epoch_idx}.avi'
-        
+
         if args.dataset_type == 'timit':
             fps = 23.18 / args.data.fps_control_ratio
         elif args.dataset_type == '75-speaker':
@@ -86,7 +91,7 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
             fps = 83.28 / args.data.fps_control_ratio
         else:
             raise NotImplementedError
-        
+
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')  # Codec (you can use other codecs like 'XVID', 'MJPG', etc.)
         frame_size = (res[1], res[0])  # Frame size
         n_frames = pred.shape[0]
@@ -102,7 +107,7 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
 
         # Release the VideoWriter object
         out.release()
-    
+
     print_info = f'total validation length: {len(mse_loss_list)}'
     print_info2 = f'mse loss for validation set: {mse_loss}'
     logger.info(print_info)
@@ -111,36 +116,36 @@ def test_eval(args, model, epoch_idx, val_loader, logger, res, data_stats, devic
 def run_trainer(args, logger):
 
     set_seed(args.seed)
-    
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
-    
+
     # load dataset
     dataset = MRI(args)
     val_dataset = MRI(args, val=True)
-    
+
     dataloader = torch.utils.data.DataLoader(dataset=dataset,
                                              batch_size=args.batch_size,
                                              num_workers=args.num_workers,
                                              pin_memory=True,
                                              shuffle=True,
                                              drop_last=True)
-    
+
     val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset,
                                                  batch_size=1,
                                                  num_workers=1,
                                                  pin_memory=True,
                                                  shuffle=False,
                                                  drop_last=False)
-    
+
     # set optimizer
     optimizer, scheduler, model, start_epoch, _ = build_optimizer_model(args,
                                                                         logger,
                                                                         dataset,
                                                                         device)
     model = model.to(device)
-    
+
     data_stats = (dataset.mgc_mean, dataset.mgc_std)
-    
+
     frame_H = dataset.frameHeight
     frame_W = dataset.frameWidth
 
@@ -153,8 +158,8 @@ def run_trainer(args, logger):
         ssim_func = SSIM(data_range=1.0, channel=1, win_size=args.ssimloss_window)
 
     print(f'start_epoch: {start_epoch}')
-    
-    for epoch_idx in tqdm(range(start_epoch, args.train_epoch+1)):
+
+    for epoch_idx in tqdm(range(start_epoch, args.train_epoch+1), ncols=150):
         model.train()
 
         for iteration, items in enumerate(dataloader):
@@ -164,9 +169,9 @@ def run_trainer(args, logger):
             mgc_lsp_coeff = items[1].to(device)
 
             _, B, H, W = video.shape
-            
+
             sup_video, voice = data_batchify(mgc_lsp_coeff, video, args.data.lookback, args.data.fps_control_ratio)
-            
+
             # run model
             # pred first image in initial
             if args.model.use_deform:
@@ -175,18 +180,19 @@ def run_trainer(args, logger):
                 # since the voice and video were cut at data_batchify function,
                 # the length of video was changed.
                 # therefore change the code a little bit
+
                 pred = model(voice, video.view(-1, H, W)[args.data.lookback-2:args.data.lookback-2+sup_video.shape[0]])
             else:
                 pred = model(voice)
-                
+
             # pred next image with given initial images
             loss_dict = dict()
             loss_dict['mse_loss'] = torch.nn.functional.mse_loss(pred, sup_video) * args.mseloss_weight
-            
+
             if args.use_ssimloss:
                 ssim_pred = pred.unsqueeze(2).view(-1, 1, frame_H, frame_W)
                 ssim_video = sup_video.unsqueeze(2).view(-1, 1, frame_H, frame_W)
-                
+
                 loss_dict['ssim_loss'] = (1 - ssim_func(ssim_pred, ssim_video)) * args.ssimloss_weight
 
             if args.use_temporal_consistency:
@@ -196,10 +202,10 @@ def run_trainer(args, logger):
             loss = 0
             for key, value in loss_dict.items():
                 loss = loss + value
-            
+
             loss.backward()
             optimizer.step()
-            
+
         if epoch_idx % args.epoch_print == 0 or epoch_idx == 1:
             init_viz = '\n Train {} | Epoch: {} | Iter: {} | '.format(args.exp_name, epoch_idx, iteration)
             loss_viz = 'loss: {:4f}'.format(loss.item())
@@ -209,12 +215,12 @@ def run_trainer(args, logger):
             for key, value in loss_dict.items():
                 temp_print_item = f' | {key}: {value.item():4f}'
                 print_item += temp_print_item
-            
+
             logger.info(print_item)
 
         if epoch_idx % args.epoch_eval == 0 and epoch_idx > 0:
             test_eval(args, model, epoch_idx, val_dataloader, logger, (frame_H, frame_W), data_stats, device)
-                
+
         if epoch_idx % args.epoch_viz == 0 and epoch_idx > 0:
             visualization(args, pred, sup_video, epoch_idx, iteration)
 
