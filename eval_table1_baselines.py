@@ -6,7 +6,7 @@ Compares combinations of registration and optical flow methods:
 - Registration: SuperPoint+RANSAC, LoFTR, Ours (A2M2A)
 - Optical Flow: Horn-Schunck, TV-L1, Deep Flow (RAFT)
 
-Computes metrics: EPE, DirSim, Smooth
+Computes metrics: EPE, DirSim, Smooth, MotionActivityRatio, MotionCoverageRatio
 """
 
 import argparse
@@ -42,6 +42,8 @@ try:
         compute_epe,
         compute_dirsim, 
         compute_smoothness,
+        compute_motion_activity_ratio,
+        compute_motion_coverage_ratio,
         warp_frame_with_flow,
     )
 except ImportError:
@@ -56,6 +58,8 @@ except ImportError:
     compute_epe = metric_utils.compute_epe
     compute_dirsim = metric_utils.compute_dirsim
     compute_smoothness = metric_utils.compute_smoothness
+    compute_motion_activity_ratio = metric_utils.compute_motion_activity_ratio
+    compute_motion_coverage_ratio = metric_utils.compute_motion_coverage_ratio
     warp_frame_with_flow = metric_utils.warp_frame_with_flow
 
 
@@ -585,6 +589,8 @@ def run_evaluation(
     device: str = "cuda",
     num_frames: int = None,
     save_visualizations_flag: bool = False,
+    method_keys: Optional[List[str]] = None,
+    motion_threshold: float = 0.5,
     log_dir: Optional[str] = None,
     use_prev_frame: bool = True,
     gt_video_file: Optional[str] = None,
@@ -599,6 +605,7 @@ def run_evaluation(
         device: "cuda" or "cpu"
         num_frames: Number of frames to process (for speed)
         save_visualizations_flag: Save visualization images for qualitative figures
+        motion_threshold: Threshold τ for Motion Activity Ratio
         log_dir: Path to A2M2A model checkpoint directory (required for "Ours" method)
         use_prev_frame: Enable autoregressive generation for "Ours" method
         gt_video_file: Path to ground truth video with audio (required for "Ours" method)
@@ -664,7 +671,7 @@ def run_evaluation(
     device = actual_device  # Update device for rest of function
     
     # Define method combinations
-    methods = [
+    all_methods = [
         ("SuperPoint+RANSAC", "Horn-Schunck"),
         ("SuperPoint+RANSAC", "TV-L1"),
         ("SuperPoint+RANSAC", "Deep Flow"),
@@ -673,10 +680,37 @@ def run_evaluation(
         ("LoFTR", "Deep Flow"),
         ("Ours", "Horn-Schunck"),
         ("Ours", "TV-L1"),
+        ("Ours", "Deep Flow"),
     ]
-    
-    print(f"\n✓ Will evaluate all 8 methods (6 baselines + 2 Ours variants)")
+
+    methods = all_methods
+    if method_keys:
+        key_to_method = {}
+        for reg_method, flow_method in all_methods:
+            method_key = f"{reg_method}+{flow_method}"
+            key_to_method[method_key] = (reg_method, flow_method)
+            key_to_method[method_key.replace("+", "_").replace(" ", "_")] = (reg_method, flow_method)
+
+        filtered = []
+        unknown_keys = []
+        for key in method_keys:
+            method = key_to_method.get(key)
+            if method is None:
+                unknown_keys.append(key)
+            elif method not in filtered:
+                filtered.append(method)
+
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown method key(s): {unknown_keys}. "
+                f"Supported keys: {[f'{r}+{f}' for r, f in all_methods]}"
+            )
+        methods = filtered
+
+    print(f"\n✓ Will evaluate {len(methods)} method(s)")
     print(f"✓ FAIR COMPARISON: All methods use GT MRI → anime")
+    if method_keys:
+        print(f"✓ Filtered methods: {', '.join([f'{r}+{f}' for r, f in methods])}")
     
     results = {}
     
@@ -843,15 +877,25 @@ def run_evaluation(
             print(f"       Computing metrics...")
             epe_vals = []
             dirsim_vals = []
+            motion_ratio_vals = []
+            coverage_ratio_vals = []
             for mri_flow, anime_flow in zip(mri_flows, anime_flows):
                 epe = compute_epe(mri_flow, anime_flow)
                 epe_vals.append(epe)
                 dirsim_val = compute_dirsim(mri_flow, anime_flow)
                 dirsim_vals.append(dirsim_val)
+                motion_ratio_vals.append(
+                    compute_motion_activity_ratio(mri_flow, anime_flow, tau=motion_threshold)
+                )
+                coverage_ratio_vals.append(
+                    compute_motion_coverage_ratio(mri_flow, anime_flow, tau=motion_threshold)
+                )
             
             epe = float(np.mean(epe_vals)) if epe_vals else 0.0
             dirsim = float(np.mean(dirsim_vals)) if dirsim_vals else 0.0
             smooth = compute_smoothness(anime_flows)
+            motion_ratio = float(np.mean(motion_ratio_vals)) if motion_ratio_vals else 0.0
+            coverage_ratio = float(np.mean(coverage_ratio_vals)) if coverage_ratio_vals else 0.0
             
             results[f"{reg_method}+{flow_method}"] = {
                 "registration_method": reg_method,
@@ -859,11 +903,15 @@ def run_evaluation(
                 "EPE": epe,
                 "DirSim": dirsim,
                 "Smooth": smooth,
+                "MotionActivityRatio": motion_ratio,
+                "MotionCoverageRatio": coverage_ratio,
             }
             
             print(f"  EPE: {epe:.4f}")
             print(f"  DirSim: {dirsim:.4f}")
             print(f"  Smooth: {smooth:.4f}")
+            print(f"  MotionActivityRatio: {motion_ratio:.4f} (tau={motion_threshold})")
+            print(f"  MotionCoverageRatio: {coverage_ratio:.4f} (tau={motion_threshold})")
             
             # Save visualizations if requested
             if save_visualizations_flag:
@@ -920,15 +968,17 @@ def print_results_table(results: Dict):
     print("\n" + "="*80)
     print("TABLE 1: Baseline Comparison Results")
     print("="*80)
-    print(f"{'Registration':<20} {'Optical Flow':<20} {'EPE ↓':<15} {'DirSim ↑':<15} {'Smooth ↓':<15}")
+    print(f"{'Registration':<20} {'Optical Flow':<20} {'EPE ↓':<10} {'DirSim ↑':<10} {'Smooth ↓':<10} {'ActRatio':<10} {'CovRatio':<10}")
     print("-"*80)
     
     for key, result in results.items():
         if "error" in result:
             print(f"{result['registration_method']:<20} {result['optical_flow_method']:<20} ERROR")
         else:
+            act_ratio = result.get("MotionActivityRatio", float("nan"))
+            cov_ratio = result.get("MotionCoverageRatio", float("nan"))
             print(f"{result['registration_method']:<20} {result['optical_flow_method']:<20} "
-                  f"{result['EPE']:<15.4f} {result['DirSim']:<15.4f} {result['Smooth']:<15.4f}")
+                  f"{result['EPE']:<10.4f} {result['DirSim']:<10.4f} {result['Smooth']:<10.4f} {act_ratio:<10.4f} {cov_ratio:<10.4f}")
     
     print("="*80 + "\n")
 
@@ -943,6 +993,18 @@ if __name__ == "__main__":
     parser.add_argument("--num_frames", type=int, default=None, help="Number of frames to process")
     parser.add_argument("--save_visualizations", action="store_true",
                         help="Save qualitative visualizations for paper figures")
+    parser.add_argument(
+        "--motion_threshold",
+        type=float,
+        default=0.5,
+        help="Motion magnitude threshold tau for MotionActivityRatio"
+    )
+    parser.add_argument(
+        "--method_keys",
+        type=str,
+        default="",
+        help="Comma-separated method keys (e.g., 'Ours+Deep Flow' or 'Ours_Deep_Flow')"
+    )
     
     # Arguments for "Ours" method
     parser.add_argument("--log_dir", type=str, default=None,
@@ -953,6 +1015,7 @@ if __name__ == "__main__":
                         help="Path to ground truth video file with audio (required for 'Ours' method)")
     
     args = parser.parse_args()
+    parsed_method_keys = [key.strip() for key in args.method_keys.split(",") if key.strip()] if args.method_keys else None
     
     results = run_evaluation(
         args.mri_video,
@@ -961,6 +1024,8 @@ if __name__ == "__main__":
         device=args.device,
         num_frames=args.num_frames,
         save_visualizations_flag=args.save_visualizations,
+        method_keys=parsed_method_keys,
+        motion_threshold=args.motion_threshold,
         log_dir=args.log_dir,
         use_prev_frame=args.use_prev_frame,
         gt_video_file=args.gt_video_file,

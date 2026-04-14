@@ -10,7 +10,7 @@ TABLE1_EVAL_*.md
 cleanup_visualization_folders.sh
 rerun_missing_ours_videos.sh
 run_batch_eval.sh
-run_eval_table1.sh*
+run_eval_table1.sh.*
 run_pipeline_hj.sh
 test_*.sh
 .gitignore

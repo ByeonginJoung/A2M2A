@@ -257,9 +257,79 @@ def compute_smoothness(flow_sequence: List[np.ndarray]) -> float:
     return float(np.mean(smooth_vals)) if smooth_vals else 0.0
 
 
+def compute_motion_activity_ratio(
+    flow_mri: np.ndarray,
+    flow_anime: np.ndarray,
+    tau: float = 0.5,
+) -> float:
+    """
+    Compute Motion Activity Ratio (R_act).
+
+    Formula:
+        R_act = sum_i 1(||F_anim(i)|| > tau) / sum_i 1(||F_mri(i)|| > tau)
+
+    Args:
+        flow_mri: Optical flow array (H, W, 2) from MRI video
+        flow_anime: Optical flow array (H, W, 2) from anime video
+        tau: Motion magnitude threshold in pixels
+
+    Returns:
+        Motion activity ratio. Returns 0.0 if MRI has no active-motion pixels.
+    """
+    if flow_mri.shape != flow_anime.shape:
+        h, w = flow_mri.shape[:2]
+        flow_anime = cv2.resize(flow_anime, (w, h))
+
+    mag_mri = np.sqrt(flow_mri[..., 0] ** 2 + flow_mri[..., 1] ** 2)
+    mag_anime = np.sqrt(flow_anime[..., 0] ** 2 + flow_anime[..., 1] ** 2)
+
+    active_mri = int(np.sum(mag_mri > tau))
+    active_anime = int(np.sum(mag_anime > tau))
+    if active_mri == 0:
+        return 0.0
+    return float(active_anime / active_mri)
+
+
+def compute_motion_coverage_ratio(
+    flow_mri: np.ndarray,
+    flow_anime: np.ndarray,
+    tau: float = 0.5,
+) -> float:
+    """
+    Compute Motion Coverage Ratio (R_cov).
+
+    Formula:
+        R_cov = sum_i 1(||F_mri(i)|| > tau AND ||F_anim(i)|| > tau) /
+                sum_i 1(||F_mri(i)|| > tau)
+
+    Args:
+        flow_mri: Optical flow array (H, W, 2) from MRI video
+        flow_anime: Optical flow array (H, W, 2) from anime video
+        tau: Motion magnitude threshold in pixels
+
+    Returns:
+        Motion coverage ratio. Returns 0.0 if MRI has no active-motion pixels.
+    """
+    if flow_mri.shape != flow_anime.shape:
+        h, w = flow_mri.shape[:2]
+        flow_anime = cv2.resize(flow_anime, (w, h))
+
+    mag_mri = np.sqrt(flow_mri[..., 0] ** 2 + flow_mri[..., 1] ** 2)
+    mag_anime = np.sqrt(flow_anime[..., 0] ** 2 + flow_anime[..., 1] ** 2)
+
+    active_mri = mag_mri > tau
+    active_anime = mag_anime > tau
+    denom = int(np.sum(active_mri))
+    if denom == 0:
+        return 0.0
+    overlap = int(np.sum(active_mri & active_anime))
+    return float(overlap / denom)
+
+
 def compute_stage3_metrics(
     mri_flows: List[np.ndarray], 
-    anime_flows: List[np.ndarray]
+    anime_flows: List[np.ndarray],
+    tau: float = 0.5,
 ) -> dict:
     """
     Compute all Stage 3 metrics (motion faithfulness).
@@ -269,7 +339,7 @@ def compute_stage3_metrics(
         anime_flows: List of (H, W, 2) consecutive-frame optical flows from anime video
     
     Returns:
-        Dictionary with keys: epe, dirsim, smooth
+        Dictionary with keys: epe, dirsim, smooth, motion_activity_ratio, motion_coverage_ratio
     """
     T = min(len(mri_flows), len(anime_flows))
     if T == 0:
@@ -291,9 +361,13 @@ def compute_stage3_metrics(
     # Compute EPE and DirSim for each frame pair
     epe_vals = []
     dirsim_vals = []
+    motion_ratio_vals = []
+    coverage_ratio_vals = []
     for f_mri, f_anime in zip(mri_f, anime_f):
         epe_vals.append(compute_epe(f_mri, f_anime))
         dirsim_vals.append(compute_dirsim(f_mri, f_anime))
+        motion_ratio_vals.append(compute_motion_activity_ratio(f_mri, f_anime, tau=tau))
+        coverage_ratio_vals.append(compute_motion_coverage_ratio(f_mri, f_anime, tau=tau))
     
     # Compute smoothness
     smooth = compute_smoothness(anime_f)
@@ -302,6 +376,8 @@ def compute_stage3_metrics(
         "epe": float(np.mean(epe_vals)),
         "dirsim": float(np.mean(dirsim_vals)),
         "smooth": smooth,
+        "motion_activity_ratio": float(np.mean(motion_ratio_vals)),
+        "motion_coverage_ratio": float(np.mean(coverage_ratio_vals)),
     }
 
 
@@ -437,3 +513,7 @@ def print_metrics(metrics: dict, prefix: str = "") -> None:
         print(f"{prefix}  DirSim: {metrics['dirsim']:.6f}")
     if "smooth" in metrics:
         print(f"{prefix}  Smooth: {metrics['smooth']:.6f}")
+    if "motion_activity_ratio" in metrics:
+        print(f"{prefix}  MotionActivityRatio: {metrics['motion_activity_ratio']:.6f}")
+    if "motion_coverage_ratio" in metrics:
+        print(f"{prefix}  MotionCoverageRatio: {metrics['motion_coverage_ratio']:.6f}")
