@@ -198,7 +198,6 @@ def run_evaluation(
     motion_threshold: float,
     num_frames: Optional[int],
     device: str,
-    resume: bool,
 ) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         print("[WARN] CUDA unavailable, falling back to CPU.")
@@ -220,6 +219,7 @@ def run_evaluation(
     done = 0
     skip = 0
     fail = 0
+    overwritten = 0
     method_values: Dict[str, Dict[str, List[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -234,11 +234,6 @@ def run_evaluation(
 
             if not vis_root.is_dir():
                 print(f"[SKIP] {sub_id}/{clip_id} - visualizations missing")
-                skip += 1
-                continue
-
-            if resume and out_json.is_file():
-                print(f"[DONE] {sub_id}/{clip_id} - {output_json_name} exists")
                 skip += 1
                 continue
 
@@ -324,6 +319,9 @@ def run_evaluation(
                     payload["errors"] = method_errors
 
                 out_json.parent.mkdir(parents=True, exist_ok=True)
+                if out_json.is_file():
+                    overwritten += 1
+                    print(f"[OVERWRITE] {sub_id}/{clip_id} - replacing existing {output_json_name}")
                 out_json.write_text(json.dumps(payload, indent=2))
                 done += 1
                 print(
@@ -355,7 +353,10 @@ def run_evaluation(
             f"{smooth:>10.6f} {act:>10.6f} {cov:>10.6f}"
         )
     print("-" * 85)
-    print(f"Total clips: {total}, done: {done}, skipped: {skip}, failed: {fail}")
+    print(
+        f"Total clips: {total}, done: {done}, overwritten: {overwritten}, "
+        f"skipped: {skip}, failed: {fail}"
+    )
     print("=" * 85)
 
 
@@ -380,7 +381,11 @@ def main() -> None:
     parser.add_argument("--motion_threshold", type=float, default=0.5)
     parser.add_argument("--num_frames", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
-    parser.add_argument("--resume", action="store_true", help="Skip clip if output JSON exists")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Deprecated and ignored: evaluation now always recomputes and overwrites output JSON.",
+    )
     args = parser.parse_args()
 
     eval_root = Path(args.eval_root)
@@ -419,7 +424,6 @@ def main() -> None:
         motion_threshold=args.motion_threshold,
         num_frames=args.num_frames,
         device=args.device,
-        resume=args.resume,
     )
 
 
