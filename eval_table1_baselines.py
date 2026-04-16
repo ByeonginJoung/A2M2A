@@ -622,6 +622,13 @@ def run_evaluation(
     
     print(f"Loading reference anime from {ref_anime_path}")
     ref_anime = load_image(ref_anime_path, frame_format="bgr")
+    ref_mri_path = ref_anime_path.replace("ref_anime", "ref_mri")
+    if not os.path.exists(ref_mri_path):
+        raise FileNotFoundError(
+            f"Reference MRI image not found for baseline registration: {ref_mri_path}"
+        )
+    print(f"Loading reference MRI from {ref_mri_path}")
+    ref_mri_reference = load_image(ref_mri_path, frame_format="gray")
     
     # Upscale MRI frames to match reference anime resolution for high-quality outputs
     target_size = (ref_anime.shape[1], ref_anime.shape[0])  # (width, height)
@@ -804,18 +811,34 @@ def run_evaluation(
                 eval_anime_frames = pred_anime_frames
                 
             else:
-                # Baseline methods: Register reference anime to first MRI frame
-                print("  [1/3] Registering reference anime to MRI...")
-                ref_mri = mri_frames_gray[0]
-                
-                if reg_method == "SuperPoint+RANSAC":
-                    reg_matrix, _ = register_with_superpoint_ransac(ref_mri, ref_mri, device)
-                elif reg_method == "LoFTR":
-                    reg_matrix, _ = register_with_loftr(ref_mri, ref_mri, device)
+                # Baseline methods: mirror process_video() anchor search behavior.
+                # Register reference MRI against all target MRI frames and keep best match.
+                print("  [1/3] Registering reference anime to MRI (best-anchor search)...")
+                lowest_mse = float("inf")
+                best_idx = 0
+                reg_matrix = np.eye(2, 3, dtype=np.float32)
+
+                for i, target_mri in enumerate(mri_frames_gray):
+                    if reg_method == "SuperPoint+RANSAC":
+                        candidate_matrix, mse = register_with_superpoint_ransac(
+                            ref_mri_reference, target_mri, device
+                        )
+                    elif reg_method == "LoFTR":
+                        candidate_matrix, mse = register_with_loftr(
+                            ref_mri_reference, target_mri, device
+                        )
+                    else:
+                        raise ValueError(f"Unsupported baseline registration method: {reg_method}")
+
+                    if mse < lowest_mse:
+                        lowest_mse = mse
+                        reg_matrix = candidate_matrix
+                        best_idx = i
+
+                print(f"    ✓ Best anchor frame: {best_idx} (MSE: {lowest_mse:.6f})")
                 
                 # Warp reference anime using registration
-                h, w = ref_mri.shape
-                ref_anime = load_image(ref_anime_path, frame_format="bgr")
+                h, w = mri_frames_gray[0].shape
                 ref_anime_warped = cv2.warpAffine(ref_anime, reg_matrix, (w, h))
                 
                 # Use ground truth MRI for evaluation
