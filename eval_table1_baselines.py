@@ -44,7 +44,6 @@ try:
         compute_smoothness,
         compute_motion_activity_ratio,
         compute_motion_coverage_ratio,
-        warp_frame_with_flow,
     )
 except ImportError:
     # Fallback: load the module manually
@@ -60,7 +59,6 @@ except ImportError:
     compute_smoothness = metric_utils.compute_smoothness
     compute_motion_activity_ratio = metric_utils.compute_motion_activity_ratio
     compute_motion_coverage_ratio = metric_utils.compute_motion_coverage_ratio
-    warp_frame_with_flow = metric_utils.warp_frame_with_flow
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,11 +369,60 @@ def compute_flow_raft(
     return flow
 
 
+def compute_optical_flow_pair(
+    frame1_bgr: np.ndarray,
+    frame2_bgr: np.ndarray,
+    flow_method: str,
+    raft_model: torch.nn.Module,
+    device: str,
+) -> np.ndarray:
+    """Dispatch optical flow computation by method name."""
+    if flow_method == "Horn-Schunck":
+        return compute_flow_hornschunck(frame1_bgr, frame2_bgr)
+    if flow_method == "TV-L1":
+        return compute_flow_tvl1(frame1_bgr, frame2_bgr)
+    if flow_method == "Deep Flow":
+        return compute_flow_raft(frame1_bgr, frame2_bgr, raft_model, device)
+    raise ValueError(f"Unsupported optical flow method: {flow_method}")
+
+
+def warp_anime_anchor_relative(
+    ref_anime_bgr: np.ndarray,
+    rigid_transform: np.ndarray,
+    flow_field: np.ndarray,
+    target_dims: Tuple[int, int],
+) -> np.ndarray:
+    """
+    Warp reference anime directly to target frame using anchor-relative flow.
+    Matches A2M2A's direct warping strategy (not iterative propagation).
+    """
+    target_h, target_w = target_dims
+    x, y = np.meshgrid(np.arange(target_w), np.arange(target_h))
+    map_x_to_anchor = x - flow_field[:, :, 0]
+    map_y_to_anchor = y - flow_field[:, :, 1]
+
+    target_to_ref = cv2.invertAffineTransform(rigid_transform)
+    coords_anchor = np.stack([map_x_to_anchor.flatten(), map_y_to_anchor.flatten()])
+    coords_anchor_h = np.vstack([coords_anchor, np.ones(coords_anchor.shape[1])])
+    coords_ref = target_to_ref @ coords_anchor_h
+
+    final_map_x = coords_ref[0].reshape(target_h, target_w).astype(np.float32)
+    final_map_y = coords_ref[1].reshape(target_h, target_w).astype(np.float32)
+    return cv2.remap(
+        ref_anime_bgr,
+        final_map_x,
+        final_map_y,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Metric Computation (using centralized utils/metric_utils.py)
 # ─────────────────────────────────────────────────────────────────────────────
-# Note: compute_epe, compute_dirsim, compute_smoothness, and warp_frame_with_flow
-# are now imported from utils.metric_utils to ensure consistency across all
+# Note: compute_epe, compute_dirsim, and compute_smoothness
+# are imported from utils.metric_utils to ensure consistency across all
 # evaluation scripts.
 
 
@@ -761,6 +808,8 @@ def run_evaluation(
         
         try:
             # Step 1: Get MRI and anime sequences
+            best_idx = 0
+            rigid_transform = np.eye(2, 3, dtype=np.float32)
             if reg_method == "Ours":
                 # FAIR COMPARISON: Use GT MRI (same as baselines) and generate anime using main.py
                 print("  [1/3] Generating anime from GT MRI using A2M2A deformation...")
@@ -836,27 +885,26 @@ def run_evaluation(
                         best_idx = i
 
                 print(f"    ✓ Best anchor frame: {best_idx} (MSE: {lowest_mse:.6f})")
-                
-                # Warp reference anime using registration
-                h, w = mri_frames_gray[0].shape
-                ref_anime_warped = cv2.warpAffine(ref_anime, reg_matrix, (w, h))
-                
+
+                # Scale registration transform to evaluation frame resolution
+                h_ref, w_ref = ref_mri_reference.shape
+                h_eval, w_eval = mri_frames_gray[0].shape
+                rigid_transform = reg_matrix.copy()
+                rigid_transform[0, :] *= (w_eval / w_ref)
+                rigid_transform[1, :] *= (h_eval / h_ref)
+
                 # Use ground truth MRI for evaluation
                 eval_mri_gray = mri_frames_gray
                 eval_mri_bgr = mri_frames_bgr
-                eval_anime_frames = [ref_anime_warped]  # Will be populated in next step
+                eval_anime_frames = []  # Populated with anchor-relative direct warps
             
             # Step 2: Compute MRI optical flow
             print(f"  [2/3] Computing MRI optical flow sequence...")
             mri_flows = []
             for i in range(len(eval_mri_bgr) - 1):
-                if flow_method == "Horn-Schunck":
-                    flow = compute_flow_hornschunck(eval_mri_bgr[i], eval_mri_bgr[i + 1])
-                elif flow_method == "TV-L1":
-                    flow = compute_flow_tvl1(eval_mri_bgr[i], eval_mri_bgr[i + 1])
-                elif flow_method == "Deep Flow":
-                    flow = compute_flow_raft(eval_mri_bgr[i], eval_mri_bgr[i + 1], raft_model, device)
-                
+                flow = compute_optical_flow_pair(
+                    eval_mri_bgr[i], eval_mri_bgr[i + 1], flow_method, raft_model, device
+                )
                 mri_flows.append(flow)
             
             # Step 3: Compute anime optical flow
@@ -867,33 +915,27 @@ def run_evaluation(
                 # For "Ours", anime frames are already generated from GT MRI
                 # Just compute flow between consecutive anime frames
                 for i in range(len(eval_anime_frames) - 1):
-                    if flow_method == "Horn-Schunck":
-                        anime_flow = compute_flow_hornschunck(eval_anime_frames[i], eval_anime_frames[i + 1])
-                    elif flow_method == "TV-L1":
-                        anime_flow = compute_flow_tvl1(eval_anime_frames[i], eval_anime_frames[i + 1])
-                    elif flow_method == "Deep Flow":
-                        anime_flow = compute_flow_raft(eval_anime_frames[i], eval_anime_frames[i + 1], raft_model, device)
-                    
+                    anime_flow = compute_optical_flow_pair(
+                        eval_anime_frames[i], eval_anime_frames[i + 1], flow_method, raft_model, device
+                    )
                     anime_flows.append(anime_flow)
             else:
-                # For baseline methods, warp anime using MRI flow
-                for i in range(len(mri_flows)):
-                    # Warp current anime frame using MRI flow to get next anime frame
-                    current_anime = eval_anime_frames[-1]
-                    mri_flow = mri_flows[i]
-                    
-                    # Warp anime using MRI flow
-                    next_anime = warp_frame_with_flow(current_anime, mri_flow)
-                    eval_anime_frames.append(next_anime)
-                    
-                    # Compute optical flow between consecutive anime frames
-                    if flow_method == "Horn-Schunck":
-                        anime_flow = compute_flow_hornschunck(current_anime, next_anime)
-                    elif flow_method == "TV-L1":
-                        anime_flow = compute_flow_tvl1(current_anime, next_anime)
-                    elif flow_method == "Deep Flow":
-                        anime_flow = compute_flow_raft(current_anime, next_anime, raft_model, device)
-                    
+                # Baselines now use anchor-relative direct warping (same strategy as Ours).
+                anchor_frame = eval_mri_bgr[best_idx]
+                target_dims = (eval_mri_bgr[0].shape[0], eval_mri_bgr[0].shape[1])
+                for frame in eval_mri_bgr:
+                    anchor_relative_flow = compute_optical_flow_pair(
+                        anchor_frame, frame, flow_method, raft_model, device
+                    )
+                    anime_frame = warp_anime_anchor_relative(
+                        ref_anime, rigid_transform, anchor_relative_flow, target_dims
+                    )
+                    eval_anime_frames.append(anime_frame)
+
+                for i in range(len(eval_anime_frames) - 1):
+                    anime_flow = compute_optical_flow_pair(
+                        eval_anime_frames[i], eval_anime_frames[i + 1], flow_method, raft_model, device
+                    )
                     anime_flows.append(anime_flow)
             
             # Step 4: Compute metrics

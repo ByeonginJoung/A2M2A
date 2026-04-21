@@ -20,3 +20,5 @@ test_*.sh
 __pycache__/
 config/__pycache__/
 submodules/SuperPoint
+run_export_gt_visualizations.sh
+run_batch_eval_only_metric.sh

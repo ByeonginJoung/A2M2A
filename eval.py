@@ -24,6 +24,7 @@ For new evaluation scripts, import from utils/metric_utils.py instead.
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -35,6 +36,18 @@ import torch
 # Add RAFT to path so the model can be loaded
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "submodules", "RAFT"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "submodules", "RAFT", "core"))
+from raft import RAFT  # type: ignore
+
+# Load metric_utils explicitly to avoid collision with RAFT's utils package.
+_metric_utils_spec = importlib.util.spec_from_file_location(
+    "metric_utils", os.path.join(os.path.dirname(__file__), "utils", "metric_utils.py")
+)
+if _metric_utils_spec is None or _metric_utils_spec.loader is None:
+    raise RuntimeError("Failed to load utils/metric_utils.py")
+_metric_utils = importlib.util.module_from_spec(_metric_utils_spec)
+_metric_utils_spec.loader.exec_module(_metric_utils)
+compute_stage1_metrics = _metric_utils.compute_stage1_metrics
+compute_stage3_metrics = _metric_utils.compute_stage3_metrics
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,13 +106,55 @@ def get_video_fps(video_path):
     return fps
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 – MRI Reconstruction Metrics
-# ─────────────────────────────────────────────────────────────────────────────
-# NOTE: These implementations match utils/metric_utils.py exactly.
-# Kept here for standalone use of eval.py without package imports.
+def _load_raft(raft_path, device):
+    model = RAFT(
+        argparse.Namespace(
+            model=str(raft_path),
+            small=True,
+            mixed_precision=False,
+            alternate_corr=False,
+        )
+    )
+    checkpoint = torch.load(str(raft_path), map_location=device)
+    if "module." in list(checkpoint.keys())[0]:
+        checkpoint = {
+            (k[7:] if k.startswith("module.") else k): v
+            for k, v in checkpoint.items()
+        }
+    model.load_state_dict(checkpoint)
+    return model.to(device).eval()
 
-def compute_stage1_metrics(gt_frames, pred_frames):
+
+def _compute_flow_raft(frame1_bgr, frame2_bgr, raft_model, device, flow_hw=(256, 256)):
+    h_orig, w_orig = frame1_bgr.shape[:2]
+    tgt_h, tgt_w = flow_hw
+
+    f1 = cv2.resize(frame1_bgr, (tgt_w, tgt_h))
+    f2 = cv2.resize(frame2_bgr, (tgt_w, tgt_h))
+    f1 = cv2.cvtColor(f1, cv2.COLOR_BGR2RGB)
+    f2 = cv2.cvtColor(f2, cv2.COLOR_BGR2RGB)
+
+    t1 = torch.from_numpy(f1).permute(2, 0, 1).float().unsqueeze(0).to(device)
+    t2 = torch.from_numpy(f2).permute(2, 0, 1).float().unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        _, flow_up = raft_model(t1, t2, iters=20, test_mode=True)
+
+    flow = flow_up[0].cpu().numpy().transpose(1, 2, 0)
+    flow = cv2.resize(flow, (w_orig, h_orig))
+    flow[..., 0] *= w_orig / tgt_w
+    flow[..., 1] *= h_orig / tgt_h
+    return flow
+
+
+def compute_consecutive_flows(frames_bgr, raft_model, device, flow_hw=(256, 256)):
+    flows = []
+    for i in range(len(frames_bgr) - 1):
+        flow = _compute_flow_raft(
+            frames_bgr[i], frames_bgr[i + 1], raft_model, device, flow_hw=flow_hw
+        )
+        flows.append(flow)
+    return flows
 
 def main():
     parser = argparse.ArgumentParser(
