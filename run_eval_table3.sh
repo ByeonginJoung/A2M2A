@@ -41,8 +41,9 @@ SAVE_VIS="${SAVE_VIS:-1}"   # 1=save frame-by-frame visualizations
 USE_SAVED_VIS="${USE_SAVED_VIS:-0}"  # 1=compute metrics from saved visualizations when available
 PRE_SCALE_TARGET="${PRE_SCALE_TARGET:-1}"  # 1=upscale MRI frames to ref anime resolution (avoids cropped-looking outputs)
 
+#SUBJECTS="002 009 014 025 028 038 039 041 057 067"
 if [ -z "${SUBJECTS+x}" ]; then
-    SUBJECTS="002 009 014 025 028 038 039 041 057 067"
+    SUBJECTS="038 039 041 057 067"
 fi
 
 if [ -z "${CLIP_IDS+x}" ]; then

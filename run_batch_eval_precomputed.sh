@@ -23,7 +23,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 DATASET_ROOT="${DATASET_ROOT:-/ssd1tb_00/dataset/mri_data}"
 BATCH_ROOT="${BATCH_ROOT:-eval_output_batch}"
 TOP_N="${TOP_N:-10}"
-RESUME="${RESUME:-1}"                      # 1=skip clips with eval_metrics.json
+RESUME="${RESUME:-0}"                      # 1=skip clips with eval_metrics.json
 DEVICE="${DEVICE:-cuda}"
 MOTION_TAU="${MOTION_TAU:-0.5}"
 

@@ -198,6 +198,7 @@ def run_evaluation(
     motion_threshold: float,
     num_frames: Optional[int],
     device: str,
+    resume: bool,
 ) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         print("[WARN] CUDA unavailable, falling back to CPU.")
@@ -231,6 +232,42 @@ def run_evaluation(
             vis_root = clip_dir / "visualizations"
             out_json = clip_dir / output_json_name
             total += 1
+
+            if resume and out_json.is_file():
+                try:
+                    payload = json.loads(out_json.read_text())
+                    clip_results = payload.get("results", {})
+                    target_methods = method_dirs if method_dirs else sorted(clip_results.keys())
+                    loaded = 0
+                    for method_dir_name in target_methods:
+                        method_result = clip_results.get(method_dir_name)
+                        if not isinstance(method_result, dict):
+                            continue
+                        epe = method_result.get("EPE")
+                        dirsim = method_result.get("DirSim")
+                        smooth = method_result.get("Smooth")
+                        actratio = method_result.get("MotionActivityRatio")
+                        covratio = method_result.get("MotionCoverageRatio")
+                        if None in (epe, dirsim, smooth, actratio, covratio):
+                            continue
+                        method_values[method_dir_name]["epe"].append(epe)
+                        method_values[method_dir_name]["dirsim"].append(dirsim)
+                        method_values[method_dir_name]["smooth"].append(smooth)
+                        method_values[method_dir_name]["actratio"].append(actratio)
+                        method_values[method_dir_name]["covratio"].append(covratio)
+                        loaded += 1
+
+                    skip += 1
+                    print(
+                        f"[SKIP] {sub_id}/{clip_id} - loaded existing {output_json_name}"
+                        + (f", methods: {loaded}" if loaded else "")
+                    )
+                    continue
+                except Exception as e:
+                    print(
+                        f"[WARN] {sub_id}/{clip_id} - failed to load existing "
+                        f"{output_json_name} ({e}); recomputing"
+                    )
 
             if not vis_root.is_dir():
                 print(f"[SKIP] {sub_id}/{clip_id} - visualizations missing")
@@ -384,7 +421,7 @@ def main() -> None:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Deprecated and ignored: evaluation now always recomputes and overwrites output JSON.",
+        help="Skip recomputation when output JSON exists and load it for final aggregation.",
     )
     args = parser.parse_args()
 
@@ -424,6 +461,7 @@ def main() -> None:
         motion_threshold=args.motion_threshold,
         num_frames=args.num_frames,
         device=args.device,
+        resume=args.resume,
     )
 
 
