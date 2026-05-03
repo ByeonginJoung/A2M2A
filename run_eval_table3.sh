@@ -87,6 +87,7 @@ echo "========================================================================"
 python3 - <<'PYEOF'
 import argparse
 import csv
+import gc
 import json
 import os
 import sys
@@ -112,7 +113,10 @@ if metric_utils_spec is None or metric_utils_spec.loader is None:
 metric_utils = importlib.util.module_from_spec(metric_utils_spec)
 metric_utils_spec.loader.exec_module(metric_utils)
 
-compute_stage3_metrics = metric_utils.compute_stage3_metrics
+compute_epe = metric_utils.compute_epe
+compute_dirsim = metric_utils.compute_dirsim
+compute_motion_activity_ratio = metric_utils.compute_motion_activity_ratio
+compute_motion_coverage_ratio = metric_utils.compute_motion_coverage_ratio
 
 
 def env(name: str, default: str = "") -> str:
@@ -236,8 +240,8 @@ def save_visualizations(
     anchor_frame: np.ndarray,
     mri_frames: List[np.ndarray],
     anime_frames: List[np.ndarray],
-    mri_flows: List[np.ndarray],
-    anime_flows: List[np.ndarray],
+    raft_model: torch.nn.Module,
+    device_name: str,
 ) -> None:
     vis_root = vis_root_for(sub_id, clip_id, ablation)
     reg_dir = vis_root / "registration"
@@ -264,9 +268,12 @@ def save_visualizations(
     for i, frame in enumerate(anime_frames):
         cv2.imwrite(str(seq_dir / f"anime_warped_{i:04d}.png"), frame)
 
-    for i in range(min(len(mri_flows), len(anime_flows))):
-        mri_vis = flow_to_image(mri_flows[i], convert_to_bgr=True)
-        anime_vis = flow_to_image(anime_flows[i], convert_to_bgr=True)
+    flow_n = min(len(mri_frames), len(anime_frames)) - 1
+    for i in range(max(flow_n, 0)):
+        mri_flow = flow_raft(mri_frames[i], mri_frames[i + 1], raft_model, device_name)
+        anime_flow = flow_raft(anime_frames[i], anime_frames[i + 1], raft_model, device_name)
+        mri_vis = flow_to_image(mri_flow, convert_to_bgr=True)
+        anime_vis = flow_to_image(anime_flow, convert_to_bgr=True)
         cv2.imwrite(str(flow_dir / f"mri_flow_{i:04d}.png"), mri_vis)
         cv2.imwrite(str(flow_dir / f"anime_flow_{i:04d}.png"), anime_vis)
         h = max(mri_vis.shape[0], anime_vis.shape[0])
@@ -315,23 +322,25 @@ def register_ecc(ref_img: np.ndarray, target_img: np.ndarray) -> Tuple[np.ndarra
 
 def get_transform_and_anchor(
     ref_gray: np.ndarray,
-    mri_gray_frames: List[np.ndarray],
+    mri_frames_bgr: List[np.ndarray],
     use_preprocess: bool,
     use_anchor: bool,
 ) -> Tuple[np.ndarray, int, float]:
-    if not mri_gray_frames:
+    if not mri_frames_bgr:
         return np.eye(2, 3, dtype=np.float32), 0, float("inf")
 
     if not use_anchor:
-        ref_p, target_p = preprocess_pair(ref_gray, mri_gray_frames[0], use_preprocess)
+        target_gray = cv2.cvtColor(mri_frames_bgr[0], cv2.COLOR_BGR2GRAY)
+        ref_p, target_p = preprocess_pair(ref_gray, target_gray, use_preprocess)
         matrix, mse = register_ecc(ref_p, target_p)
         return matrix, 0, mse
 
     best_idx = 0
     best_mse = float("inf")
     best_matrix = np.eye(2, 3, dtype=np.float32)
-    for i, frame in enumerate(mri_gray_frames):
-        ref_p, target_p = preprocess_pair(ref_gray, frame, use_preprocess)
+    for i, frame_bgr in enumerate(mri_frames_bgr):
+        target_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        ref_p, target_p = preprocess_pair(ref_gray, target_gray, use_preprocess)
         matrix, mse = register_ecc(ref_p, target_p)
         if mse < best_mse:
             best_idx = i
@@ -380,10 +389,51 @@ def flow_raft(
     return flow
 
 
-def consecutive_flows(
-    frames: List[np.ndarray], raft_model: torch.nn.Module, device_name: str
-) -> List[np.ndarray]:
-    return [flow_raft(frames[i], frames[i + 1], raft_model, device_name) for i in range(len(frames) - 1)]
+def compute_stage3_metrics_from_frames(
+    mri_frames: List[np.ndarray],
+    anime_frames: List[np.ndarray],
+    raft_model: torch.nn.Module,
+    device_name: str,
+    tau: float,
+) -> dict:
+    t = min(len(mri_frames), len(anime_frames))
+    if t < 2:
+        raise ValueError("Need at least 2 frames for motion metrics.")
+
+    epe_vals: List[float] = []
+    dirsim_vals: List[float] = []
+    motion_ratio_vals: List[float] = []
+    coverage_ratio_vals: List[float] = []
+    smooth_vals: List[float] = []
+
+    prev_anime_flow: Optional[np.ndarray] = None
+    for i in range(t - 1):
+        mri_flow = flow_raft(mri_frames[i], mri_frames[i + 1], raft_model, device_name)
+        anime_flow = flow_raft(anime_frames[i], anime_frames[i + 1], raft_model, device_name)
+
+        epe_vals.append(compute_epe(mri_flow, anime_flow))
+        dirsim_vals.append(compute_dirsim(mri_flow, anime_flow))
+        motion_ratio_vals.append(compute_motion_activity_ratio(mri_flow, anime_flow, tau=tau))
+        coverage_ratio_vals.append(compute_motion_coverage_ratio(mri_flow, anime_flow, tau=tau))
+
+        if prev_anime_flow is not None:
+            if prev_anime_flow.shape != anime_flow.shape:
+                h, w = prev_anime_flow.shape[:2]
+                anime_flow_rs = cv2.resize(anime_flow, (w, h))
+            else:
+                anime_flow_rs = anime_flow
+            diff = anime_flow_rs - prev_anime_flow
+            per_pixel_norm = np.sqrt(diff[..., 0] ** 2 + diff[..., 1] ** 2)
+            smooth_vals.append(float(np.mean(per_pixel_norm)))
+        prev_anime_flow = anime_flow
+
+    return {
+        "epe": float(np.mean(epe_vals)),
+        "dirsim": float(np.mean(dirsim_vals)),
+        "smooth": float(np.mean(smooth_vals)) if smooth_vals else 0.0,
+        "motion_activity_ratio": float(np.mean(motion_ratio_vals)),
+        "motion_coverage_ratio": float(np.mean(coverage_ratio_vals)),
+    }
 
 
 def warp_anime_from_anchor(
@@ -434,17 +484,18 @@ def build_anime_sequence_anchor_relative(
     rigid_transform[1, :] *= (h / h_ref)
 
     anchor_frame = mri_frames_bgr[anchor_idx]
-    anchor_relative_flows = [flow_raft(anchor_frame, frame, raft_model, device_name) for frame in mri_frames_bgr]
 
     anime_frames: List[Optional[np.ndarray]] = [None] * n
     for t in range(anchor_idx, n):
+        flow_t = flow_raft(anchor_frame, mri_frames_bgr[t], raft_model, device_name)
         anime_frames[t] = warp_anime_from_anchor(
-            ref_anime_bgr, rigid_transform, anchor_relative_flows[t], (h, w)
+            ref_anime_bgr, rigid_transform, flow_t, (h, w)
         )
     if bidirectional:
         for t in range(anchor_idx - 1, -1, -1):
+            flow_t = flow_raft(anchor_frame, mri_frames_bgr[t], raft_model, device_name)
             anime_frames[t] = warp_anime_from_anchor(
-                ref_anime_bgr, rigid_transform, anchor_relative_flows[t], (h, w)
+                ref_anime_bgr, rigid_transform, flow_t, (h, w)
             )
     else:
         for t in range(anchor_idx - 1, -1, -1):
@@ -492,8 +543,6 @@ for sub in subjects:
                     cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
                     for frame in mri_frames
                 ]
-        mri_gray_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in mri_frames]
-        mri_flows = consecutive_flows(mri_frames, raft, device)
 
         for ab_name, use_pre, use_anchor, use_bidir in ablations:
             cache_key = f"{key_base}::{ab_name}"
@@ -529,7 +578,6 @@ for sub in subjects:
             reg_err = float("nan")
             anime_frames: List[np.ndarray] = []
             mri_frames_eval = mri_frames
-            mri_flows_eval = mri_flows
 
             if use_saved_vis and has_saved_vis(sub_id, clip, ab_name):
                 seq_dir = vis_root_for(sub_id, clip, ab_name) / "temporal_sequence"
@@ -545,16 +593,15 @@ for sub in subjects:
                         mri_frames_eval = mri_frames[:n]
                         anime_frames = loaded_anime[:n]
                     if len(mri_frames_eval) >= 2 and len(anime_frames) >= 2:
-                        mri_flows_eval = consecutive_flows(mri_frames_eval, raft, device)
-                        anime_flows = consecutive_flows(anime_frames, raft, device)
-                        stage3 = compute_stage3_metrics(mri_flows_eval, anime_flows, tau=motion_tau)
+                        stage3 = compute_stage3_metrics_from_frames(
+                            mri_frames_eval, anime_frames, raft, device, motion_tau
+                        )
                         anchor_idx, reg_err = get_registration_from_cache(cache, cache_key)
 
             if stage3 is None:
                 mri_frames_eval = mri_frames
-                mri_flows_eval = mri_flows
                 reg_matrix, anchor_idx, reg_err = get_transform_and_anchor(
-                    ref_mri_gray, mri_gray_frames, use_preprocess=use_pre, use_anchor=use_anchor
+                    ref_mri_gray, mri_frames, use_preprocess=use_pre, use_anchor=use_anchor
                 )
                 ref_anime_warped = cv2.warpAffine(
                     ref_anime_bgr,
@@ -575,8 +622,9 @@ for sub in subjects:
                 )
                 if len(anime_frames) < 2:
                     continue
-                anime_flows = consecutive_flows(anime_frames, raft, device)
-                stage3 = compute_stage3_metrics(mri_flows_eval, anime_flows, tau=motion_tau)
+                stage3 = compute_stage3_metrics_from_frames(
+                    mri_frames_eval, anime_frames, raft, device, motion_tau
+                )
             else:
                 # placeholder for compatibility with save_visualizations path
                 ref_anime_warped = (
@@ -604,8 +652,8 @@ for sub in subjects:
                     anchor_frame=mri_frames[min(max(anchor_idx, 0), len(mri_frames) - 1)],
                     mri_frames=mri_frames_eval,
                     anime_frames=anime_frames,
-                    mri_flows=mri_flows_eval,
-                    anime_flows=anime_flows,
+                    raft_model=raft,
+                    device_name=device,
                 )
 
             row = {
@@ -632,6 +680,10 @@ for sub in subjects:
             cache[cache_key] = row
             done += 1
         print(f"[{sub_id}/{clip}] processed")
+        del mri_frames
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
 with detail_json.open("w") as f:
     json.dump(cache, f, indent=2)
