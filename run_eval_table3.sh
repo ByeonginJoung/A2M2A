@@ -37,8 +37,8 @@ RAFT_MODEL="${RAFT_MODEL:-submodules/RAFT/models/raft-small.pth}"
 DEVICE="${DEVICE:-cuda}"
 MOTION_TAU="${MOTION_TAU:-0.5}"
 RESUME="${RESUME:-0}"
-SAVE_VIS="${SAVE_VIS:-1}"   # 1=save frame-by-frame visualizations
-USE_SAVED_VIS="${USE_SAVED_VIS:-0}"  # 1=compute metrics from saved visualizations when available
+SAVE_VIS="${SAVE_VIS:-0}"   # 1=save frame-by-frame visualizations
+USE_SAVED_VIS="${USE_SAVED_VIS:-1}"  # 1=compute metrics from saved visualizations when available
 PRE_SCALE_TARGET="${PRE_SCALE_TARGET:-1}"  # 1=upscale MRI frames to ref anime resolution (avoids cropped-looking outputs)
 
 #SUBJECTS="002 009 014 025 028 038 039 041 057 067"
@@ -113,10 +113,7 @@ if metric_utils_spec is None or metric_utils_spec.loader is None:
 metric_utils = importlib.util.module_from_spec(metric_utils_spec)
 metric_utils_spec.loader.exec_module(metric_utils)
 
-compute_epe = metric_utils.compute_epe
-compute_dirsim = metric_utils.compute_dirsim
-compute_motion_activity_ratio = metric_utils.compute_motion_activity_ratio
-compute_motion_coverage_ratio = metric_utils.compute_motion_coverage_ratio
+compute_stage3_metrics = metric_utils.compute_stage3_metrics
 
 
 def env(name: str, default: str = "") -> str:
@@ -400,40 +397,16 @@ def compute_stage3_metrics_from_frames(
     if t < 2:
         raise ValueError("Need at least 2 frames for motion metrics.")
 
-    epe_vals: List[float] = []
-    dirsim_vals: List[float] = []
-    motion_ratio_vals: List[float] = []
-    coverage_ratio_vals: List[float] = []
-    smooth_vals: List[float] = []
-
-    prev_anime_flow: Optional[np.ndarray] = None
+    mri_flows: List[np.ndarray] = []
+    anime_flows: List[np.ndarray] = []
     for i in range(t - 1):
-        mri_flow = flow_raft(mri_frames[i], mri_frames[i + 1], raft_model, device_name)
-        anime_flow = flow_raft(anime_frames[i], anime_frames[i + 1], raft_model, device_name)
+        mri_flows.append(flow_raft(mri_frames[i], mri_frames[i + 1], raft_model, device_name))
+        anime_flows.append(flow_raft(anime_frames[i], anime_frames[i + 1], raft_model, device_name))
 
-        epe_vals.append(compute_epe(mri_flow, anime_flow))
-        dirsim_vals.append(compute_dirsim(mri_flow, anime_flow))
-        motion_ratio_vals.append(compute_motion_activity_ratio(mri_flow, anime_flow, tau=tau))
-        coverage_ratio_vals.append(compute_motion_coverage_ratio(mri_flow, anime_flow, tau=tau))
-
-        if prev_anime_flow is not None:
-            if prev_anime_flow.shape != anime_flow.shape:
-                h, w = prev_anime_flow.shape[:2]
-                anime_flow_rs = cv2.resize(anime_flow, (w, h))
-            else:
-                anime_flow_rs = anime_flow
-            diff = anime_flow_rs - prev_anime_flow
-            per_pixel_norm = np.sqrt(diff[..., 0] ** 2 + diff[..., 1] ** 2)
-            smooth_vals.append(float(np.mean(per_pixel_norm)))
-        prev_anime_flow = anime_flow
-
-    return {
-        "epe": float(np.mean(epe_vals)),
-        "dirsim": float(np.mean(dirsim_vals)),
-        "smooth": float(np.mean(smooth_vals)) if smooth_vals else 0.0,
-        "motion_activity_ratio": float(np.mean(motion_ratio_vals)),
-        "motion_coverage_ratio": float(np.mean(coverage_ratio_vals)),
-    }
+    stage3 = compute_stage3_metrics(mri_flows, anime_flows, tau=tau)
+    del mri_flows
+    del anime_flows
+    return stage3
 
 
 def warp_anime_from_anchor(
@@ -562,7 +535,7 @@ for sub in subjects:
                 # - act_ratio must be present
                 # - pre_scale_target mode must match
                 if (
-                    cached.get("dirsim_scale") == "0_1"
+                    cached.get("dirsim_scale") == "raw_-1_1"
                     and "act_ratio" in cached
                     and bool(cached.get("pre_scale_target", False)) == pre_scale_target
                     and cached.get("warp_strategy") == "anchor_relative"
@@ -640,7 +613,6 @@ for sub in subjects:
                 )
 
             dirsim_raw = float(stage3.get("dirsim"))
-            dirsim_01 = 0.5 * (dirsim_raw + 1.0)
             if save_vis and not (use_saved_vis and has_saved_vis(sub_id, clip, ab_name)):
                 save_visualizations(
                     sub_id=sub_id,
@@ -667,8 +639,8 @@ for sub in subjects:
                 "registration_error": float(reg_err),
                 "epe": float(stage3.get("epe")),
                 "dirsim_raw": dirsim_raw,
-                "dirsim": dirsim_01,
-                "dirsim_scale": "0_1",
+                "dirsim": dirsim_raw,
+                "dirsim_scale": "raw_-1_1",
                 "smooth": float(stage3.get("smooth")),
                 "act_ratio": float(stage3.get("motion_activity_ratio")),
                 "cov_ratio": float(stage3.get("motion_coverage_ratio")),
@@ -739,7 +711,7 @@ with summary_csv.open("w", newline="") as f:
 
 lines = []
 header = "  {:<18} {:<10} {:<8} {:<13} {:>8} {:>10} {:>12} {:>10} {:>10} {:>10}".format(
-    "Ablation", "Preprocess", "Anchor", "Bidirectional", "N", "EPE", "DirSim[0,1]", "Smooth", "ActRatio", "CovRatio"
+    "Ablation", "Preprocess", "Anchor", "Bidirectional", "N", "EPE", "DirSim", "Smooth", "ActRatio", "CovRatio"
 )
 sep = "  " + "-" * (len(header) - 2)
 lines.extend([header, sep])
