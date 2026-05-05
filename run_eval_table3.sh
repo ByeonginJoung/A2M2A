@@ -90,7 +90,9 @@ import csv
 import gc
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -147,6 +149,10 @@ if not raft_path.is_file():
 if device == "cuda" and not torch.cuda.is_available():
     print("[WARN] CUDA unavailable, fallback to CPU.")
     device = "cpu"
+if use_saved_vis:
+    print("[INFO] USE_SAVED_VIS is ignored to keep Table3 metric computation path identical to Table1.")
+if not pre_scale_target:
+    print("[INFO] PRE_SCALE_TARGET=0 overridden for metric consistency with Table1 (always pre-scaled).")
 
 output_dir.mkdir(parents=True, exist_ok=True)
 per_clip_csv = output_dir / "table3_per_clip.csv"
@@ -173,6 +179,61 @@ def read_video_bgr(path: Path) -> List[np.ndarray]:
         frames.append(frame)
     cap.release()
     return frames
+
+
+def write_video_bgr(path: Path, frames: List[np.ndarray], fps: float = 20.0) -> None:
+    if not frames:
+        raise ValueError("Cannot write empty frame list.")
+    h, w = frames[0].shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to open video writer: {path}")
+    for frame in frames:
+        if frame.shape[:2] != (h, w):
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
+        writer.write(frame)
+    writer.release()
+
+
+def generate_anime_via_process_video(
+    mri_frames_bgr: List[np.ndarray],
+    ref_mri_path_local: Path,
+    ref_anime_path_local: Path,
+) -> List[np.ndarray]:
+    """
+    Match Table1 "Ours" protocol exactly:
+    1) write GT MRI frames to a temp mp4,
+    2) run main.process_video(..., pre_scale_target=True),
+    3) read generated anime mp4 back.
+    """
+    from main import process_video
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="table3_eval_"))
+    try:
+        mri_video = tmp_dir / "gt_mri.mp4"
+        h, w = mri_frames_bgr[0].shape[:2]
+        out = cv2.VideoWriter(str(mri_video), cv2.VideoWriter_fourcc(*"mp4v"), 20.0, (w, h))
+        for frame in mri_frames_bgr:
+            out.write(frame)
+        out.release()
+
+        anime_dir = tmp_dir / "anime"
+        anime_dir.mkdir(parents=True, exist_ok=True)
+        process_video(
+            target_video_path=str(mri_video),
+            output_dir=str(anime_dir),
+            ref_mri_path=str(ref_mri_path_local),
+            ref_anime_path=str(ref_anime_path_local),
+            registration_mode="ecc",
+            debug=False,
+            pre_scale_target=True,
+        )
+        anime_video = anime_dir / "gt_mri.mp4"
+        if not anime_video.is_file():
+            raise RuntimeError(f"Generated anime video not found: {anime_video}")
+        return read_video_bgr(anime_video)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def resolve_gt_video(sub_id: str, clip_id: str) -> Optional[Path]:
@@ -393,15 +454,37 @@ def compute_stage3_metrics_from_frames(
     device_name: str,
     tau: float,
 ) -> dict:
+    """
+    Match eval_precomputed.py metric protocol:
+    - evaluate on decoded video frames (not raw in-memory arrays),
+    - compute consecutive RAFT flows,
+    - run compute_stage3_metrics on those flows.
+    """
     t = min(len(mri_frames), len(anime_frames))
     if t < 2:
         raise ValueError("Need at least 2 frames for motion metrics.")
 
+    mri_eval = mri_frames[:t]
+    anime_eval = anime_frames[:t]
+    tmp_dir = Path(tempfile.mkdtemp(prefix="table3_metric_io_"))
+    try:
+        mri_video = tmp_dir / "mri_eval.mp4"
+        anime_video = tmp_dir / "anime_eval.mp4"
+        write_video_bgr(mri_video, mri_eval, fps=20.0)
+        write_video_bgr(anime_video, anime_eval, fps=20.0)
+        mri_decoded = read_video_bgr(mri_video)
+        anime_decoded = read_video_bgr(anime_video)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    tt = min(len(mri_decoded), len(anime_decoded))
+    if tt < 2:
+        raise ValueError("Need at least 2 decoded frames for motion metrics.")
     mri_flows: List[np.ndarray] = []
     anime_flows: List[np.ndarray] = []
-    for i in range(t - 1):
-        mri_flows.append(flow_raft(mri_frames[i], mri_frames[i + 1], raft_model, device_name))
-        anime_flows.append(flow_raft(anime_frames[i], anime_frames[i + 1], raft_model, device_name))
+    for i in range(tt - 1):
+        mri_flows.append(flow_raft(mri_decoded[i], mri_decoded[i + 1], raft_model, device_name))
+        anime_flows.append(flow_raft(anime_decoded[i], anime_decoded[i + 1], raft_model, device_name))
 
     stage3 = compute_stage3_metrics(mri_flows, anime_flows, tau=tau)
     del mri_flows
@@ -506,18 +589,23 @@ for sub in subjects:
         mri_video = resolve_gt_video(sub_id, clip)
         if mri_video is None:
             continue
-        mri_frames = read_video_bgr(mri_video)
-        if len(mri_frames) < 2:
+        mri_frames_raw = read_video_bgr(mri_video)
+        if len(mri_frames_raw) < 2:
             continue
-        if pre_scale_target:
-            target_h, target_w = ref_anime_bgr.shape[:2]
-            if mri_frames[0].shape[:2] != (target_h, target_w):
-                mri_frames = [
-                    cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
-                    for frame in mri_frames
-                ]
+        target_h, target_w = ref_anime_bgr.shape[:2]
+        if mri_frames_raw[0].shape[:2] != (target_h, target_w):
+            mri_frames_scaled_to_ref = [
+                cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+                for frame in mri_frames_raw
+            ]
+        else:
+            mri_frames_scaled_to_ref = mri_frames_raw
+
+        # Keep MRI pre-scaling always enabled to match Table1 protocol.
+        mri_frames = mri_frames_scaled_to_ref
 
         for ab_name, use_pre, use_anchor, use_bidir in ablations:
+            clip_mri_frames = mri_frames_scaled_to_ref if ab_name == "full" else mri_frames
             cache_key = f"{key_base}::{ab_name}"
             vis_ready = (not save_vis) or (
                 has_saved_vis(sub_id, clip, ab_name)
@@ -530,15 +618,16 @@ for sub in subjects:
             )
             if resume and cache_key in cache and vis_ready:
                 cached = cache[cache_key]
+                expected_warp_strategy = "process_video" if ab_name == "full" else "anchor_relative"
                 # Cache version gate:
-                # - dirsim must be normalized to [0,1]
+                # - dirsim must be raw scale [-1,1]
                 # - act_ratio must be present
                 # - pre_scale_target mode must match
                 if (
                     cached.get("dirsim_scale") == "raw_-1_1"
                     and "act_ratio" in cached
-                    and bool(cached.get("pre_scale_target", False)) == pre_scale_target
-                    and cached.get("warp_strategy") == "anchor_relative"
+                    and bool(cached.get("pre_scale_target", False)) is True
+                    and cached.get("warp_strategy") == expected_warp_strategy
                     and cached.get("mri_source") == "gt_dataset"
                 ):
                     rows.append(cached)
@@ -550,9 +639,11 @@ for sub in subjects:
             anchor_idx = 0
             reg_err = float("nan")
             anime_frames: List[np.ndarray] = []
-            mri_frames_eval = mri_frames
+            mri_frames_eval = clip_mri_frames
+            warp_strategy = "anchor_relative"
+            can_use_saved_vis = False
 
-            if use_saved_vis and has_saved_vis(sub_id, clip, ab_name):
+            if can_use_saved_vis and has_saved_vis(sub_id, clip, ab_name):
                 seq_dir = vis_root_for(sub_id, clip, ab_name) / "temporal_sequence"
                 loaded_anime = load_image_sequence(seq_dir, "anime_warped_")
                 loaded_mri = load_image_sequence(seq_dir, "mri_")
@@ -562,8 +653,8 @@ for sub in subjects:
                         mri_frames_eval = loaded_mri[:n]
                         anime_frames = loaded_anime[:n]
                     else:
-                        n = min(len(mri_frames), len(loaded_anime))
-                        mri_frames_eval = mri_frames[:n]
+                        n = min(len(clip_mri_frames), len(loaded_anime))
+                        mri_frames_eval = clip_mri_frames[:n]
                         anime_frames = loaded_anime[:n]
                     if len(mri_frames_eval) >= 2 and len(anime_frames) >= 2:
                         stage3 = compute_stage3_metrics_from_frames(
@@ -572,27 +663,35 @@ for sub in subjects:
                         anchor_idx, reg_err = get_registration_from_cache(cache, cache_key)
 
             if stage3 is None:
-                mri_frames_eval = mri_frames
+                mri_frames_eval = clip_mri_frames
                 reg_matrix, anchor_idx, reg_err = get_transform_and_anchor(
-                    ref_mri_gray, mri_frames, use_preprocess=use_pre, use_anchor=use_anchor
+                    ref_mri_gray, clip_mri_frames, use_preprocess=use_pre, use_anchor=use_anchor
                 )
                 ref_anime_warped = cv2.warpAffine(
                     ref_anime_bgr,
                     reg_matrix,
-                    (mri_frames[0].shape[1], mri_frames[0].shape[0]),
+                    (clip_mri_frames[0].shape[1], clip_mri_frames[0].shape[0]),
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=(0, 0, 0),
                 )
-                anime_frames = build_anime_sequence_anchor_relative(
-                    mri_frames_bgr=mri_frames,
-                    ref_anime_bgr=ref_anime_bgr,
-                    reg_matrix=reg_matrix,
-                    anchor_idx=anchor_idx,
-                    bidirectional=use_bidir,
-                    raft_model=raft,
-                    device_name=device,
-                    ref_mri_shape=ref_mri_gray.shape,
-                )
+                if ab_name == "full":
+                    anime_frames = generate_anime_via_process_video(
+                        mri_frames_bgr=clip_mri_frames,
+                        ref_mri_path_local=ref_mri_path,
+                        ref_anime_path_local=ref_anime_path,
+                    )
+                    warp_strategy = "process_video"
+                else:
+                    anime_frames = build_anime_sequence_anchor_relative(
+                        mri_frames_bgr=clip_mri_frames,
+                        ref_anime_bgr=ref_anime_bgr,
+                        reg_matrix=reg_matrix,
+                        anchor_idx=anchor_idx,
+                        bidirectional=use_bidir,
+                        raft_model=raft,
+                        device_name=device,
+                        ref_mri_shape=ref_mri_gray.shape,
+                    )
                 if len(anime_frames) < 2:
                     continue
                 stage3 = compute_stage3_metrics_from_frames(
@@ -604,7 +703,7 @@ for sub in subjects:
                     cv2.warpAffine(
                         ref_anime_bgr,
                         reg_matrix,
-                        (mri_frames[0].shape[1], mri_frames[0].shape[0]),
+                        (clip_mri_frames[0].shape[1], clip_mri_frames[0].shape[0]),
                         borderMode=cv2.BORDER_CONSTANT,
                         borderValue=(0, 0, 0),
                     )
@@ -621,7 +720,7 @@ for sub in subjects:
                     ref_mri_gray=ref_mri_gray,
                     ref_anime_bgr=ref_anime_bgr,
                     ref_anime_warped=ref_anime_warped,
-                    anchor_frame=mri_frames[min(max(anchor_idx, 0), len(mri_frames) - 1)],
+                    anchor_frame=clip_mri_frames[min(max(anchor_idx, 0), len(clip_mri_frames) - 1)],
                     mri_frames=mri_frames_eval,
                     anime_frames=anime_frames,
                     raft_model=raft,
@@ -644,8 +743,8 @@ for sub in subjects:
                 "smooth": float(stage3.get("smooth")),
                 "act_ratio": float(stage3.get("motion_activity_ratio")),
                 "cov_ratio": float(stage3.get("motion_coverage_ratio")),
-                "pre_scale_target": bool(pre_scale_target),
-                "warp_strategy": "anchor_relative",
+                "pre_scale_target": True,
+                "warp_strategy": warp_strategy,
                 "mri_source": "gt_dataset",
             }
             rows.append(row)
@@ -653,6 +752,8 @@ for sub in subjects:
             done += 1
         print(f"[{sub_id}/{clip}] processed")
         del mri_frames
+        del mri_frames_raw
+        del mri_frames_scaled_to_ref
         gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
