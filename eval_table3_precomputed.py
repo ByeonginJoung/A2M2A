@@ -8,7 +8,9 @@ No anime generation/deformation is executed in this script.
 Expected layout:
   <eval_root>/subXXX/<clip_id>/visualizations/<ablation>/temporal_sequence/
     - anime_warped_*.png
-    - mri_*.png (optional; if missing, GT MRI video is loaded from dataset_root)
+
+For protocol parity with TABLE1 precomputed evaluation, MRI is always loaded
+from dataset_root GT video (not from saved mri_*.png).
 """
 
 from __future__ import annotations
@@ -241,13 +243,10 @@ def run_evaluation(
                     if len(anime_frames) < 2:
                         raise RuntimeError("missing/insufficient anime_warped_*.png")
 
-                    mri_saved_frames = _load_image_sequence(seq_dir, "mri_")
-                    mri_frames = mri_saved_frames
-                    if len(mri_frames) < 2:
-                        gt_video = _resolve_gt_video(dataset_root, sub_id, clip_id)
-                        if gt_video is None:
-                            raise RuntimeError("mri_*.png missing and GT MRI video not found")
-                        mri_frames = _load_video_bgr(gt_video)
+                    gt_video = _resolve_gt_video(dataset_root, sub_id, clip_id)
+                    if gt_video is None:
+                        raise RuntimeError("GT MRI video not found")
+                    mri_frames = _load_video_bgr(gt_video)
 
                     n = min(len(mri_frames), len(anime_frames))
                     if n < 2:
@@ -279,7 +278,7 @@ def run_evaluation(
                         "cov_ratio": float(stage3.get("motion_coverage_ratio")),
                         "pre_scale_target": legacy.get("pre_scale_target", ""),
                         "warp_strategy": "precomputed_frames",
-                        "mri_source": "saved_sequence" if len(mri_saved_frames) >= 2 else "gt_dataset_video",
+                        "mri_source": "gt_dataset_video",
                         "flow_method": "deep_flow",
                         "motion_threshold": motion_threshold,
                         "protocol": PROTOCOL,
